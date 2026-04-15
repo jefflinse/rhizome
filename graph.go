@@ -8,23 +8,22 @@ import (
 )
 
 const (
-	Start = "__start__"
-	End   = "__end__"
-
-	DefaultMaxNodeExecs = 10
+	Start = "__start__" // Virtual entry point; use in AddEdge to set the entrypoint.
+	End   = "__end__"   // Virtual terminal; use in AddEdge or return from a router to end execution.
 )
 
 // NodeFunc is a function that transforms state.
 type NodeFunc[S any] func(ctx context.Context, state S) (S, error)
 
 // Graph is a mutable builder for defining nodes and edges.
+// Call Compile to validate and produce an executable CompiledGraph.
 type Graph[S any] struct {
 	nodes            map[string]NodeFunc[S]
-	edges            map[string]string
-	conditionalEdges map[string]func(S) string
+	edges            map[string]string         // from -> to (static)
+	conditionalEdges map[string]func(S) string // from -> router
 }
 
-// New creates a new empty graph.
+// New creates an empty graph.
 func New[S any]() *Graph[S] {
 	return &Graph[S]{
 		nodes:            make(map[string]NodeFunc[S]),
@@ -87,34 +86,25 @@ func (g *Graph[S]) AddConditionalEdge(from string, router func(S) string) error 
 	return nil
 }
 
-// CompileOption configures graph compilation.
-type CompileOption func(*compileConfig)
-
-type compileConfig struct {
-	maxNodeExecs int
-}
-
-// WithMaxNodeExecs sets the maximum number of times a single node can
-// execute before the graph returns ErrCycleLimit. Default is 10.
-func WithMaxNodeExecs(n int) CompileOption {
-	return func(c *compileConfig) {
-		c.maxNodeExecs = n
-	}
-}
-
-// Compile validates the graph and returns an immutable, executable form.
+// Compile validates the graph structure and returns an immutable, executable
+// CompiledGraph. Validation checks:
+//   - At least one edge from Start exists
+//   - All static edge targets reference existing nodes or End
+//   - Every node is reachable from Start
 func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 	cfg := compileConfig{maxNodeExecs: DefaultMaxNodeExecs}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
+	// 1. Entrypoint exists.
 	_, hasStaticEntry := g.edges[Start]
-	_, hasCondEntry := g.conditionalEdges[Start]
-	if !hasStaticEntry && !hasCondEntry {
+	_, hasConditionalEntry := g.conditionalEdges[Start]
+	if !hasStaticEntry && !hasConditionalEntry {
 		return nil, ErrNoEntrypoint
 	}
 
+	// 2. All static edge targets exist.
 	for from, to := range g.edges {
 		if from != Start {
 			if _, ok := g.nodes[from]; !ok {
@@ -136,10 +126,12 @@ func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 		}
 	}
 
+	// 3. Every node is reachable from Start.
 	if err := g.checkReachability(); err != nil {
 		return nil, err
 	}
 
+	// Build immutable copies.
 	nodes := make(map[string]NodeFunc[S], len(g.nodes))
 	maps.Copy(nodes, g.nodes)
 	edges := make(map[string]string, len(g.edges))
