@@ -15,6 +15,10 @@ const (
 // NodeFunc is a function that transforms state.
 type NodeFunc[S any] func(ctx context.Context, state S) (S, error)
 
+// Middleware wraps node execution. It receives the node name, the current state,
+// and the next function in the chain. Call next to continue execution.
+type Middleware[S any] func(ctx context.Context, node string, state S, next NodeFunc[S]) (S, error)
+
 // Graph is a mutable builder for defining nodes and edges.
 // Call Compile to validate and produce an executable CompiledGraph.
 type Graph[S any] struct {

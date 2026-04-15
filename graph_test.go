@@ -402,6 +402,237 @@ func TestContextCancellation(t *testing.T) {
 	assertValues(t, result.Values, []string{"a"})
 }
 
+// Middleware tests
+
+func TestMiddlewareWrapsExecution(t *testing.T) {
+	mw := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "before:"+node)
+		s, err := next(context.Background(), s)
+		s.Values = append(s.Values, "after:"+node)
+		return s, err
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", appendValue("a")))
+	must(t, g.AddNode("b", appendValue("b")))
+	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", "b"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, result.Values, []string{
+		"before:a", "a", "after:a",
+		"before:b", "b", "after:b",
+	})
+}
+
+func TestMiddlewareChainOrder(t *testing.T) {
+	outer := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "outer-before")
+		s, err := next(context.Background(), s)
+		s.Values = append(s.Values, "outer-after")
+		return s, err
+	}
+	inner := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "inner-before")
+		s, err := next(context.Background(), s)
+		s.Values = append(s.Values, "inner-after")
+		return s, err
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", appendValue("a")))
+	must(t, g.AddEdge(Start, "a"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(outer, inner))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, result.Values, []string{
+		"outer-before", "inner-before", "a", "inner-after", "outer-after",
+	})
+}
+
+func TestMiddlewareSeesNodeName(t *testing.T) {
+	var names []string
+	mw := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		names = append(names, node)
+		return next(context.Background(), s)
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", appendValue("a")))
+	must(t, g.AddNode("b", appendValue("b")))
+	must(t, g.AddNode("c", appendValue("c")))
+	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", "b"))
+	must(t, g.AddEdge("b", "c"))
+
+	compiled := mustCompile(t, g)
+	_, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, names, []string{"a", "b", "c"})
+}
+
+func TestMiddlewareModifiesContext(t *testing.T) {
+	type ctxKey struct{}
+
+	mw := func(ctx context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		ctx = context.WithValue(ctx, ctxKey{}, "injected")
+		return next(ctx, s)
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", func(ctx context.Context, s *state) (*state, error) {
+		v, _ := ctx.Value(ctxKey{}).(string)
+		s.Values = append(s.Values, v)
+		return s, nil
+	}))
+	must(t, g.AddEdge(Start, "a"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, result.Values, []string{"injected"})
+}
+
+func TestMiddlewareSeesNodeError(t *testing.T) {
+	nodeErr := fmt.Errorf("node failed")
+	var sawError bool
+
+	mw := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "before")
+		s, err := next(context.Background(), s)
+		if err != nil {
+			sawError = true
+		}
+		s.Values = append(s.Values, "after")
+		return s, err
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", func(_ context.Context, s *state) (*state, error) {
+		s.Values = append(s.Values, "a")
+		return s, nodeErr
+	}))
+	must(t, g.AddEdge(Start, "a"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
+	if !errors.Is(err, nodeErr) {
+		t.Fatalf("got %v, want %v", err, nodeErr)
+	}
+	if !sawError {
+		t.Fatal("middleware did not see the error")
+	}
+	assertValues(t, result.Values, []string{"before", "a", "after"})
+}
+
+func TestMiddlewareShortCircuit(t *testing.T) {
+	mw := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "skipped:"+node)
+		return s, nil // does not call next
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", appendValue("a")))
+	must(t, g.AddEdge(Start, "a"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, result.Values, []string{"skipped:a"})
+}
+
+func TestMiddlewareDoesNotAffectCycleLimit(t *testing.T) {
+	mwCalls := 0
+	mw := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		mwCalls++
+		return next(context.Background(), s)
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("loop", func(_ context.Context, s *state) (*state, error) {
+		s.Counter++
+		return s, nil
+	}))
+	must(t, g.AddEdge(Start, "loop"))
+	must(t, g.AddEdge("loop", "loop"))
+
+	compiled := mustCompile(t, g, WithMaxNodeExecs(3))
+	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
+	if !errors.Is(err, ErrCycleLimit) {
+		t.Fatalf("got %v, want ErrCycleLimit", err)
+	}
+	if result.Counter != 3 {
+		t.Errorf("counter = %d, want 3", result.Counter)
+	}
+	if mwCalls != 3 {
+		t.Errorf("middleware calls = %d, want 3", mwCalls)
+	}
+}
+
+func TestMultipleWithMiddlewareCalls(t *testing.T) {
+	mw1 := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "mw1-before")
+		s, err := next(context.Background(), s)
+		s.Values = append(s.Values, "mw1-after")
+		return s, err
+	}
+	mw2 := func(_ context.Context, node string, s *state, next NodeFunc[*state]) (*state, error) {
+		s.Values = append(s.Values, "mw2-before")
+		s, err := next(context.Background(), s)
+		s.Values = append(s.Values, "mw2-after")
+		return s, err
+	}
+
+	g := New[*state]()
+	must(t, g.AddNode("a", appendValue("a")))
+	must(t, g.AddEdge(Start, "a"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{},
+		WithMiddleware(mw1),
+		WithMiddleware(mw2),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, result.Values, []string{
+		"mw1-before", "mw2-before", "a", "mw2-after", "mw1-after",
+	})
+}
+
+func TestRunWithoutMiddleware(t *testing.T) {
+	g := New[*state]()
+	must(t, g.AddNode("a", appendValue("a")))
+	must(t, g.AddEdge(Start, "a"))
+
+	compiled := mustCompile(t, g)
+	result, err := compiled.Run(context.Background(), &state{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertValues(t, result.Values, []string{"a"})
+}
+
 // Helpers
 
 func appendValue(v string) NodeFunc[*state] {
