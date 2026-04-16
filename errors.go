@@ -1,20 +1,20 @@
-package daggo
+package rhizome
 
 import "errors"
 
 // Construction errors (returned by AddNode, AddEdge, AddConditionalEdge, Compile).
 var (
-	ErrDuplicateNode   = errors.New("daggo: duplicate node")
-	ErrNodeNotFound    = errors.New("daggo: node not found")
-	ErrReservedName    = errors.New("daggo: reserved name")
-	ErrDuplicateEdge   = errors.New("daggo: duplicate edge")
-	ErrConflictingEdge = errors.New("daggo: conflicting edge")
-	ErrNoEntrypoint    = errors.New("daggo: no entrypoint")
-	ErrUnreachableNode = errors.New("daggo: unreachable node")
+	ErrDuplicateNode   = errors.New("rhizome: duplicate node")
+	ErrNodeNotFound    = errors.New("rhizome: node not found")
+	ErrReservedName    = errors.New("rhizome: reserved name")
+	ErrDuplicateEdge   = errors.New("rhizome: duplicate edge")
+	ErrConflictingEdge = errors.New("rhizome: conflicting edge")
+	ErrNoEntrypoint    = errors.New("rhizome: no entrypoint")
+	ErrUnreachableNode = errors.New("rhizome: unreachable node")
 )
 
 // Runtime errors (returned by Run).
 var (
-	ErrCycleLimit   = errors.New("daggo: node exceeded max execution count")
-	ErrInvalidRoute = errors.New("daggo: routed to unknown node")
+	ErrCycleLimit   = errors.New("rhizome: node exceeded max execution count")
+	ErrInvalidRoute = errors.New("rhizome: routed to unknown node")
 )

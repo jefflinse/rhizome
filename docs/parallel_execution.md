@@ -1,7 +1,7 @@
 # Parallel Execution
 
 This document captures the analysis and implications of adding graph-level parallel
-node execution (fan-out/fan-in) to daggo. This is deferred — the current sequential
+node execution (fan-out/fan-in) to rhizome. This is deferred — the current sequential
 model is sufficient for most LLM orchestration patterns, and within-node parallelism
 (goroutines inside a `NodeFunc`) covers many concurrent use cases without any
 graph-level changes.

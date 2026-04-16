@@ -1,5 +1,5 @@
-// Package daggo provides a lightweight, generic graph execution engine.
-package daggo
+// Package rhizome provides a lightweight, generic graph execution engine.
+package rhizome
 
 import (
 	"context"
@@ -42,7 +42,7 @@ func (g *Graph[S]) AddNode(name string, fn NodeFunc[S]) error {
 		return fmt.Errorf("%w: %q", ErrReservedName, name)
 	}
 	if fn == nil {
-		return fmt.Errorf("daggo: nil node function for %q", name)
+		return fmt.Errorf("rhizome: nil node function for %q", name)
 	}
 	if _, exists := g.nodes[name]; exists {
 		return fmt.Errorf("%w: %q", ErrDuplicateNode, name)
@@ -78,7 +78,7 @@ func (g *Graph[S]) AddConditionalEdge(from string, router func(S) string) error 
 		return fmt.Errorf("%w: cannot add conditional edge from End", ErrReservedName)
 	}
 	if router == nil {
-		return fmt.Errorf("daggo: nil router function for %q", from)
+		return fmt.Errorf("rhizome: nil router function for %q", from)
 	}
 	if _, exists := g.edges[from]; exists {
 		return fmt.Errorf("%w: %q already has a static edge", ErrConflictingEdge, from)

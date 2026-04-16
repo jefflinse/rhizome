@@ -1,4 +1,4 @@
-package daggo
+package rhizome
 
 import (
 	"context"

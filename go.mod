@@ -1,3 +1,3 @@
-module github.com/jefflinse/daggo
+module github.com/jefflinse/rhizome
 
 go 1.26.2
