@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,7 @@ func TestLinearGraph(t *testing.T) {
 	must(t, g.AddEdge(Start, "a"))
 	must(t, g.AddEdge("a", "b"))
 	must(t, g.AddEdge("b", "c"))
+	must(t, g.AddEdge("c", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{})
@@ -41,12 +43,14 @@ func TestConditionalBranching(t *testing.T) {
 	must(t, g.AddNode("left", appendValue("left")))
 	must(t, g.AddNode("right", appendValue("right")))
 	must(t, g.AddEdge(Start, "entry"))
-	must(t, g.AddConditionalEdge("entry", func(s *state) string {
+	must(t, g.AddConditionalEdge("entry", func(_ context.Context, s *state) (string, error) {
 		if s.Route == "left" {
-			return "left"
+			return "left", nil
 		}
-		return "right"
-	}))
+		return "right", nil
+	}, "left", "right"))
+	must(t, g.AddEdge("left", End))
+	must(t, g.AddEdge("right", End))
 
 	compiled := mustCompile(t, g)
 
@@ -75,12 +79,12 @@ func TestCycleWithTermination(t *testing.T) {
 		return s, nil
 	}))
 	must(t, g.AddEdge(Start, "inc"))
-	must(t, g.AddConditionalEdge("inc", func(s *state) string {
+	must(t, g.AddConditionalEdge("inc", func(_ context.Context, s *state) (string, error) {
 		if s.Counter >= 3 {
-			return End
+			return End, nil
 		}
-		return "inc"
-	}))
+		return "inc", nil
+	}, "inc", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{})
@@ -114,30 +118,18 @@ func TestCycleSafety(t *testing.T) {
 	}
 }
 
-func TestImplicitEnd(t *testing.T) {
-	g := New[*state]()
-	must(t, g.AddNode("only", appendValue("only")))
-	must(t, g.AddEdge(Start, "only"))
-
-	compiled := mustCompile(t, g)
-	result, err := compiled.Run(context.Background(), &state{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	assertValues(t, result.Values, []string{"only"})
-}
-
 func TestConditionalEntry(t *testing.T) {
 	g := New[*state]()
 	must(t, g.AddNode("fast", appendValue("fast")))
 	must(t, g.AddNode("slow", appendValue("slow")))
-	must(t, g.AddConditionalEdge(Start, func(s *state) string {
+	must(t, g.AddConditionalEdge(Start, func(_ context.Context, s *state) (string, error) {
 		if s.Route == "fast" {
-			return "fast"
+			return "fast", nil
 		}
-		return "slow"
-	}))
+		return "slow", nil
+	}, "fast", "slow"))
+	must(t, g.AddEdge("fast", End))
+	must(t, g.AddEdge("slow", End))
 
 	compiled := mustCompile(t, g)
 
@@ -168,6 +160,7 @@ func TestValueTypeState(t *testing.T) {
 	}))
 	must(t, g.AddEdge(Start, "double"))
 	must(t, g.AddEdge("double", "add1"))
+	must(t, g.AddEdge("add1", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), 5)
@@ -192,6 +185,23 @@ func TestCompileErrors(t *testing.T) {
 		must(t, g.AddNode("a", noop))
 		must(t, g.AddNode("orphan", noop))
 		must(t, g.AddEdge(Start, "a"))
+		must(t, g.AddEdge("a", End))
+		must(t, g.AddEdge("orphan", End))
+		_, err := g.Compile()
+		assertErrorIs(t, err, ErrUnreachableNode)
+	})
+
+	t.Run("unreachable node behind conditional", func(t *testing.T) {
+		g := New[*state]()
+		must(t, g.AddNode("a", noop))
+		must(t, g.AddNode("b", noop))
+		must(t, g.AddNode("orphan", noop))
+		must(t, g.AddEdge(Start, "a"))
+		must(t, g.AddConditionalEdge("a", func(_ context.Context, s *state) (string, error) {
+			return "b", nil
+		}, "b"))
+		must(t, g.AddEdge("b", End))
+		must(t, g.AddEdge("orphan", End))
 		_, err := g.Compile()
 		assertErrorIs(t, err, ErrUnreachableNode)
 	})
@@ -209,9 +219,32 @@ func TestCompileErrors(t *testing.T) {
 		g := New[*state]()
 		must(t, g.AddNode("a", noop))
 		must(t, g.AddEdge(Start, "a"))
+		must(t, g.AddEdge("a", End))
 		must(t, g.AddEdge("nonexistent", "a"))
 		_, err := g.Compile()
 		assertErrorIs(t, err, ErrNodeNotFound)
+	})
+
+	t.Run("conditional edge target not found", func(t *testing.T) {
+		g := New[*state]()
+		must(t, g.AddNode("a", noop))
+		must(t, g.AddEdge(Start, "a"))
+		must(t, g.AddConditionalEdge("a", func(_ context.Context, s *state) (string, error) {
+			return End, nil
+		}, "ghost"))
+		_, err := g.Compile()
+		assertErrorIs(t, err, ErrNodeNotFound)
+	})
+
+	t.Run("node with no outgoing edge", func(t *testing.T) {
+		g := New[*state]()
+		must(t, g.AddNode("a", noop))
+		must(t, g.AddNode("b", noop))
+		must(t, g.AddEdge(Start, "a"))
+		must(t, g.AddEdge("a", "b"))
+		// b has no outgoing edge
+		_, err := g.Compile()
+		assertErrorIs(t, err, ErrNoOutgoingEdge)
 	})
 
 	t.Run("reserved node name Start", func(t *testing.T) {
@@ -247,7 +280,7 @@ func TestCompileErrors(t *testing.T) {
 		must(t, g.AddNode("a", noop))
 		must(t, g.AddNode("b", noop))
 		must(t, g.AddEdge("a", "b"))
-		err := g.AddConditionalEdge("a", func(s *state) string { return End })
+		err := g.AddConditionalEdge("a", func(_ context.Context, s *state) (string, error) { return End, nil }, End)
 		assertErrorIs(t, err, ErrConflictingEdge)
 	})
 
@@ -255,7 +288,7 @@ func TestCompileErrors(t *testing.T) {
 		g := New[*state]()
 		must(t, g.AddNode("a", noop))
 		must(t, g.AddNode("b", noop))
-		must(t, g.AddConditionalEdge("a", func(s *state) string { return End }))
+		must(t, g.AddConditionalEdge("a", func(_ context.Context, s *state) (string, error) { return End, nil }, End))
 		err := g.AddEdge("a", "b")
 		assertErrorIs(t, err, ErrConflictingEdge)
 	})
@@ -285,15 +318,29 @@ func TestCompileErrors(t *testing.T) {
 	t.Run("nil router function", func(t *testing.T) {
 		g := New[*state]()
 		must(t, g.AddNode("x", noop))
-		err := g.AddConditionalEdge("x", nil)
+		err := g.AddConditionalEdge("x", nil, End)
 		if err == nil {
 			t.Fatal("expected error for nil router function")
 		}
 	})
+
+	t.Run("conditional edge with no targets", func(t *testing.T) {
+		g := New[*state]()
+		must(t, g.AddNode("x", noop))
+		err := g.AddConditionalEdge("x", func(_ context.Context, s *state) (string, error) { return End, nil })
+		assertErrorIs(t, err, ErrNoTargets)
+	})
+
+	t.Run("conditional edge target is Start", func(t *testing.T) {
+		g := New[*state]()
+		must(t, g.AddNode("x", noop))
+		err := g.AddConditionalEdge("x", func(_ context.Context, s *state) (string, error) { return End, nil }, Start)
+		assertErrorIs(t, err, ErrReservedName)
+	})
 }
 
 func TestRuntimeErrors(t *testing.T) {
-	t.Run("node error halts execution", func(t *testing.T) {
+	t.Run("node error wrapped with node name", func(t *testing.T) {
 		nodeErr := fmt.Errorf("node failed")
 		g := New[*state]()
 		must(t, g.AddNode("fail", func(_ context.Context, s *state) (*state, error) {
@@ -303,26 +350,71 @@ func TestRuntimeErrors(t *testing.T) {
 		must(t, g.AddNode("after", appendValue("after")))
 		must(t, g.AddEdge(Start, "fail"))
 		must(t, g.AddEdge("fail", "after"))
+		must(t, g.AddEdge("after", End))
 
 		compiled := mustCompile(t, g)
 		result, err := compiled.Run(context.Background(), &state{})
 		if !errors.Is(err, nodeErr) {
-			t.Fatalf("got %v, want %v", err, nodeErr)
+			t.Fatalf("got %v, want %v wrapped", err, nodeErr)
+		}
+		if !strings.Contains(err.Error(), `"fail"`) {
+			t.Fatalf("error message %q does not name the failing node", err.Error())
 		}
 		assertValues(t, result.Values, []string{"fail"})
 	})
 
-	t.Run("invalid route from conditional", func(t *testing.T) {
+	t.Run("router returns undeclared target", func(t *testing.T) {
 		g := New[*state]()
 		must(t, g.AddNode("router", noop))
+		must(t, g.AddNode("b", noop))
 		must(t, g.AddEdge(Start, "router"))
-		must(t, g.AddConditionalEdge("router", func(s *state) string {
-			return "nonexistent"
-		}))
+		must(t, g.AddEdge("b", End))
+		must(t, g.AddConditionalEdge("router", func(_ context.Context, s *state) (string, error) {
+			return "rogue", nil
+		}, "b"))
+
+		compiled := mustCompile(t, g)
+		_, err := compiled.Run(context.Background(), &state{})
+		assertErrorIs(t, err, ErrUndeclaredTarget)
+		if !strings.Contains(err.Error(), `"router"`) {
+			t.Fatalf("error message %q does not name the router node", err.Error())
+		}
+	})
+
+	t.Run("router returns Start", func(t *testing.T) {
+		g := New[*state]()
+		must(t, g.AddNode("router", noop))
+		must(t, g.AddNode("b", noop))
+		must(t, g.AddEdge(Start, "router"))
+		must(t, g.AddEdge("b", End))
+		must(t, g.AddConditionalEdge("router", func(_ context.Context, s *state) (string, error) {
+			return Start, nil
+		}, "b"))
 
 		compiled := mustCompile(t, g)
 		_, err := compiled.Run(context.Background(), &state{})
 		assertErrorIs(t, err, ErrInvalidRoute)
+	})
+
+	t.Run("router returns error", func(t *testing.T) {
+		routerErr := fmt.Errorf("bad state")
+		g := New[*state]()
+		must(t, g.AddNode("router", noop))
+		must(t, g.AddNode("b", noop))
+		must(t, g.AddEdge(Start, "router"))
+		must(t, g.AddEdge("b", End))
+		must(t, g.AddConditionalEdge("router", func(_ context.Context, s *state) (string, error) {
+			return "", routerErr
+		}, "b"))
+
+		compiled := mustCompile(t, g)
+		_, err := compiled.Run(context.Background(), &state{})
+		if !errors.Is(err, routerErr) {
+			t.Fatalf("got %v, want %v wrapped", err, routerErr)
+		}
+		if !strings.Contains(err.Error(), `"router"`) {
+			t.Fatalf("error message %q does not name the router node", err.Error())
+		}
 	})
 }
 
@@ -334,12 +426,13 @@ func TestConditionalEdgeToEnd(t *testing.T) {
 	}))
 	must(t, g.AddNode("unreached", appendValue("unreached")))
 	must(t, g.AddEdge(Start, "check"))
-	must(t, g.AddConditionalEdge("check", func(s *state) string {
+	must(t, g.AddConditionalEdge("check", func(_ context.Context, s *state) (string, error) {
 		if s.Route == "done" {
-			return End
+			return End, nil
 		}
-		return "unreached"
-	}))
+		return "unreached", nil
+	}, "unreached", End))
+	must(t, g.AddEdge("unreached", End))
 
 	compiled := mustCompile(t, g)
 
@@ -366,6 +459,7 @@ func TestCompiledGraphIsImmutable(t *testing.T) {
 	must(t, g.AddNode("b", appendValue("b")))
 	must(t, g.AddEdge(Start, "a"))
 	must(t, g.AddEdge("a", "b"))
+	must(t, g.AddEdge("b", End))
 
 	compiled := mustCompile(t, g)
 
@@ -393,6 +487,7 @@ func TestContextCancellation(t *testing.T) {
 	must(t, g.AddNode("b", appendValue("b")))
 	must(t, g.AddEdge(Start, "a"))
 	must(t, g.AddEdge("a", "b"))
+	must(t, g.AddEdge("b", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(ctx, &state{})
@@ -400,6 +495,26 @@ func TestContextCancellation(t *testing.T) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 	assertValues(t, result.Values, []string{"a"})
+}
+
+func TestRunLevelMaxNodeExecs(t *testing.T) {
+	g := New[*state]()
+	must(t, g.AddNode("loop", func(_ context.Context, s *state) (*state, error) {
+		s.Counter++
+		return s, nil
+	}))
+	must(t, g.AddEdge(Start, "loop"))
+	must(t, g.AddEdge("loop", "loop"))
+
+	compiled := mustCompile(t, g, WithMaxNodeExecs(100))
+
+	result, err := compiled.Run(context.Background(), &state{}, WithRunMaxNodeExecs[*state](3))
+	if !errors.Is(err, ErrCycleLimit) {
+		t.Fatalf("got %v, want ErrCycleLimit", err)
+	}
+	if result.Counter != 3 {
+		t.Errorf("counter = %d, want 3 (Run-level override)", result.Counter)
+	}
 }
 
 // Middleware tests
@@ -417,6 +532,7 @@ func TestMiddlewareWrapsExecution(t *testing.T) {
 	must(t, g.AddNode("b", appendValue("b")))
 	must(t, g.AddEdge(Start, "a"))
 	must(t, g.AddEdge("a", "b"))
+	must(t, g.AddEdge("b", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
@@ -447,6 +563,7 @@ func TestMiddlewareChainOrder(t *testing.T) {
 	g := New[*state]()
 	must(t, g.AddNode("a", appendValue("a")))
 	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(outer, inner))
@@ -473,6 +590,7 @@ func TestMiddlewareSeesNodeName(t *testing.T) {
 	must(t, g.AddEdge(Start, "a"))
 	must(t, g.AddEdge("a", "b"))
 	must(t, g.AddEdge("b", "c"))
+	must(t, g.AddEdge("c", End))
 
 	compiled := mustCompile(t, g)
 	_, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
@@ -498,6 +616,7 @@ func TestMiddlewareModifiesContext(t *testing.T) {
 		return s, nil
 	}))
 	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
@@ -528,6 +647,7 @@ func TestMiddlewareSeesNodeError(t *testing.T) {
 		return s, nodeErr
 	}))
 	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
@@ -549,6 +669,7 @@ func TestMiddlewareShortCircuit(t *testing.T) {
 	g := New[*state]()
 	must(t, g.AddNode("a", appendValue("a")))
 	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{}, WithMiddleware(mw))
@@ -604,6 +725,7 @@ func TestMultipleWithMiddlewareCalls(t *testing.T) {
 	g := New[*state]()
 	must(t, g.AddNode("a", appendValue("a")))
 	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{},
@@ -623,6 +745,7 @@ func TestRunWithoutMiddleware(t *testing.T) {
 	g := New[*state]()
 	must(t, g.AddNode("a", appendValue("a")))
 	must(t, g.AddEdge(Start, "a"))
+	must(t, g.AddEdge("a", End))
 
 	compiled := mustCompile(t, g)
 	result, err := compiled.Run(context.Background(), &state{})

@@ -43,7 +43,8 @@ func main() {
 
 ### Conditional Branching
 
-Route dynamically based on state:
+Route dynamically based on state. Declare the set of targets the router
+may return so Compile can verify reachability:
 
 ```go
 type state struct {
@@ -65,12 +66,12 @@ g.AddNode("handle-high", handleHigh)
 g.AddNode("handle-low", handleLow)
 
 g.AddEdge(rhizome.Start, "classify")
-g.AddConditionalEdge("classify", func(s *state) string {
+g.AddConditionalEdge("classify", func(_ context.Context, s *state) (string, error) {
 	if s.Status == "high" {
-		return "handle-high"
+		return "handle-high", nil
 	}
-	return "handle-low"
-})
+	return "handle-low", nil
+}, "handle-high", "handle-low")
 g.AddEdge("handle-high", rhizome.End)
 g.AddEdge("handle-low", rhizome.End)
 
@@ -90,15 +91,18 @@ g.AddNode("increment", func(_ context.Context, n int) (int, error) {
 })
 
 g.AddEdge(rhizome.Start, "increment")
-g.AddConditionalEdge("increment", func(n int) string {
+g.AddConditionalEdge("increment", func(_ context.Context, n int) (string, error) {
 	if n >= 5 {
-		return rhizome.End
+		return rhizome.End, nil
 	}
-	return "increment"
-})
+	return "increment", nil
+}, "increment", rhizome.End)
 
-compiled, _ := g.Compile(rhizome.WithMaxNodeExecs(20)) // raise limit if needed
+compiled, _ := g.Compile(rhizome.WithMaxNodeExecs(20)) // compile-time default
 result, _ := compiled.Run(context.Background(), 0)     // result: 5
+
+// Per-Run override:
+result, _ = compiled.Run(context.Background(), 0, rhizome.WithRunMaxNodeExecs[int](50))
 ```
 
 ### Middleware
@@ -123,11 +127,12 @@ result, _ := compiled.Run(ctx, 0, rhizome.WithMiddleware(logger))
 | `New[S]()` | Create a new graph builder |
 | `AddNode(name, fn)` | Register a named node |
 | `AddEdge(from, to)` | Add a static edge between nodes |
-| `AddConditionalEdge(from, router)` | Add dynamic routing based on state |
+| `AddConditionalEdge(from, router, targets...)` | Add dynamic routing; router may only return declared targets |
 | `Compile(opts...)` | Validate and freeze the graph |
 | `Run(ctx, state, opts...)` | Execute the compiled graph |
 | `Start` / `End` | Virtual entry and exit points |
-| `WithMaxNodeExecs(n)` | Compile option: set per-node execution limit |
+| `WithMaxNodeExecs(n)` | Compile option: per-node execution limit (default) |
+| `WithRunMaxNodeExecs[S](n)` | Run option: override the per-node execution limit |
 | `WithMiddleware(mw...)` | Run option: add middleware chain |
 
 ## License

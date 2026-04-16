@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 )
 
 const (
@@ -15,16 +16,30 @@ const (
 // NodeFunc is a function that transforms state.
 type NodeFunc[S any] func(ctx context.Context, state S) (S, error)
 
+// Router decides which node to execute next based on the current state.
+// It must return one of the target names declared when the conditional
+// edge was registered, or End.
+type Router[S any] func(ctx context.Context, state S) (string, error)
+
 // Middleware wraps node execution. It receives the node name, the current state,
 // and the next function in the chain. Call next to continue execution.
 type Middleware[S any] func(ctx context.Context, node string, state S, next NodeFunc[S]) (S, error)
+
+// conditionalEdge bundles a router with the set of node names it is
+// allowed to return. Declaring targets up front keeps the graph
+// statically analyzable: reachability and target-existence checks run
+// at Compile time instead of being deferred to the first bad run.
+type conditionalEdge[S any] struct {
+	router  Router[S]
+	targets []string
+}
 
 // Graph is a mutable builder for defining nodes and edges.
 // Call Compile to validate and produce an executable CompiledGraph.
 type Graph[S any] struct {
 	nodes            map[string]NodeFunc[S]
-	edges            map[string]string         // from -> to (static)
-	conditionalEdges map[string]func(S) string // from -> router
+	edges            map[string]string             // from -> to (static)
+	conditionalEdges map[string]conditionalEdge[S] // from -> router + declared targets
 }
 
 // New creates an empty graph.
@@ -32,7 +47,7 @@ func New[S any]() *Graph[S] {
 	return &Graph[S]{
 		nodes:            make(map[string]NodeFunc[S]),
 		edges:            make(map[string]string),
-		conditionalEdges: make(map[string]func(S) string),
+		conditionalEdges: make(map[string]conditionalEdge[S]),
 	}
 }
 
@@ -73,12 +88,23 @@ func (g *Graph[S]) AddEdge(from, to string) error {
 // AddConditionalEdge adds a dynamic routing function for a node.
 // The router receives the current state and returns the name of the
 // next node to execute, or End to terminate.
-func (g *Graph[S]) AddConditionalEdge(from string, router func(S) string) error {
+//
+// Targets declares the complete set of node names the router may return
+// (End is permitted). Declaring targets allows Compile to verify
+// reachability and to catch typos; at runtime, a router returning a
+// name not in targets yields ErrUndeclaredTarget.
+func (g *Graph[S]) AddConditionalEdge(from string, router Router[S], targets ...string) error {
 	if from == End {
 		return fmt.Errorf("%w: cannot add conditional edge from End", ErrReservedName)
 	}
 	if router == nil {
 		return fmt.Errorf("rhizome: nil router function for %q", from)
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("%w: from %q", ErrNoTargets, from)
+	}
+	if slices.Contains(targets, Start) {
+		return fmt.Errorf("%w: target cannot be Start", ErrReservedName)
 	}
 	if _, exists := g.edges[from]; exists {
 		return fmt.Errorf("%w: %q already has a static edge", ErrConflictingEdge, from)
@@ -86,14 +112,25 @@ func (g *Graph[S]) AddConditionalEdge(from string, router func(S) string) error 
 	if _, exists := g.conditionalEdges[from]; exists {
 		return fmt.Errorf("%w: from %q", ErrDuplicateEdge, from)
 	}
-	g.conditionalEdges[from] = router
+	dedup := make([]string, 0, len(targets))
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		dedup = append(dedup, t)
+	}
+	g.conditionalEdges[from] = conditionalEdge[S]{router: router, targets: dedup}
 	return nil
 }
 
 // Compile validates the graph structure and returns an immutable, executable
 // CompiledGraph. Validation checks:
 //   - At least one edge from Start exists
-//   - All static edge targets reference existing nodes or End
+//   - All edge targets (static and declared conditional) reference existing nodes or End
+//   - Every declared conditional target references an existing node or End
+//   - Every registered node has an outgoing edge (static or conditional)
 //   - Every node is reachable from Start
 func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 	cfg := compileConfig{maxNodeExecs: DefaultMaxNodeExecs}
@@ -101,14 +138,12 @@ func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 		opt(&cfg)
 	}
 
-	// 1. Entrypoint exists.
 	_, hasStaticEntry := g.edges[Start]
 	_, hasConditionalEntry := g.conditionalEdges[Start]
 	if !hasStaticEntry && !hasConditionalEntry {
 		return nil, ErrNoEntrypoint
 	}
 
-	// 2. All static edge targets exist.
 	for from, to := range g.edges {
 		if from != Start {
 			if _, ok := g.nodes[from]; !ok {
@@ -122,26 +157,45 @@ func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 		}
 	}
 
-	for from := range g.conditionalEdges {
+	for from, ce := range g.conditionalEdges {
 		if from != Start {
 			if _, ok := g.nodes[from]; !ok {
 				return nil, fmt.Errorf("%w: conditional edge source %q", ErrNodeNotFound, from)
 			}
 		}
+		for _, t := range ce.targets {
+			if t == End {
+				continue
+			}
+			if _, ok := g.nodes[t]; !ok {
+				return nil, fmt.Errorf("%w: conditional edge target %q from %q", ErrNodeNotFound, t, from)
+			}
+		}
 	}
 
-	// 3. Every node is reachable from Start.
+	for name := range g.nodes {
+		_, hasStatic := g.edges[name]
+		_, hasConditional := g.conditionalEdges[name]
+		if !hasStatic && !hasConditional {
+			return nil, fmt.Errorf("%w: %q", ErrNoOutgoingEdge, name)
+		}
+	}
+
 	if err := g.checkReachability(); err != nil {
 		return nil, err
 	}
 
-	// Build immutable copies.
 	nodes := make(map[string]NodeFunc[S], len(g.nodes))
 	maps.Copy(nodes, g.nodes)
 	edges := make(map[string]string, len(g.edges))
 	maps.Copy(edges, g.edges)
-	condEdges := make(map[string]func(S) string, len(g.conditionalEdges))
-	maps.Copy(condEdges, g.conditionalEdges)
+	condEdges := make(map[string]conditionalEdge[S], len(g.conditionalEdges))
+	for k, v := range g.conditionalEdges {
+		condEdges[k] = conditionalEdge[S]{
+			router:  v.router,
+			targets: slices.Clone(v.targets),
+		}
+	}
 
 	return &CompiledGraph[S]{
 		nodes:            nodes,
@@ -153,39 +207,40 @@ func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 
 func (g *Graph[S]) checkReachability() error {
 	reachable := make(map[string]bool)
-	hasConditional := false
-
 	var queue []string
 
-	if target, ok := g.edges[Start]; ok && target != End {
+	enqueue := func(target string) {
+		if target == End || reachable[target] {
+			return
+		}
 		queue = append(queue, target)
 	}
-	if _, ok := g.conditionalEdges[Start]; ok {
-		hasConditional = true
+
+	if target, ok := g.edges[Start]; ok {
+		enqueue(target)
+	}
+	if ce, ok := g.conditionalEdges[Start]; ok {
+		for _, t := range ce.targets {
+			enqueue(t)
+		}
 	}
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-
 		if reachable[current] {
 			continue
 		}
 		reachable[current] = true
 
-		if _, ok := g.conditionalEdges[current]; ok {
-			hasConditional = true
+		if target, ok := g.edges[current]; ok {
+			enqueue(target)
 		}
-
-		if target, ok := g.edges[current]; ok && target != End {
-			if !reachable[target] {
-				queue = append(queue, target)
+		if ce, ok := g.conditionalEdges[current]; ok {
+			for _, t := range ce.targets {
+				enqueue(t)
 			}
 		}
-	}
-
-	if hasConditional {
-		return nil
 	}
 
 	for name := range g.nodes {
