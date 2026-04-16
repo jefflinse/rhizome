@@ -137,4 +137,4 @@ result, _ := compiled.Run(ctx, 0, rhizome.WithMiddleware(logger))
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](LICENSE.md).
