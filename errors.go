@@ -21,3 +21,11 @@ var (
 	ErrInvalidRoute     = errors.New("rhizome: router returned invalid route")
 	ErrUndeclaredTarget = errors.New("rhizome: router returned undeclared target")
 )
+
+// Checkpointing errors.
+var (
+	ErrCheckpointRequiresSnapshotter = errors.New("rhizome: checkpointing requires state to implement Snapshotter")
+	ErrThreadIDRequired              = errors.New("rhizome: thread ID required when checkpointing is enabled")
+	ErrNoCheckpoint                  = errors.New("rhizome: no checkpoint found")
+	ErrCheckpointingDisabled         = errors.New("rhizome: checkpointing is not enabled on this graph")
+)

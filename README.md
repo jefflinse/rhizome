@@ -120,6 +120,47 @@ logger := func(ctx context.Context, node string, state int, next rhizome.NodeFun
 result, _ := compiled.Run(ctx, 0, rhizome.WithMiddleware(logger))
 ```
 
+### Checkpointing
+
+Opt in to persisted state and the graph saves a snapshot after every node.
+A crashed run can be resumed later — possibly in a different process —
+from the last successful node.
+
+State must implement `Snapshotter` (composed from the stdlib
+`encoding.BinaryMarshaler`/`BinaryUnmarshaler` pair). The type check runs
+at `Compile` time, so misconfiguration fails early.
+
+```go
+type MyState struct {
+	Step int
+	Logs []string
+}
+
+func (s *MyState) MarshalBinary() ([]byte, error)    { return json.Marshal(s) }
+func (s *MyState) UnmarshalBinary(data []byte) error { return json.Unmarshal(data, s) }
+
+store := &rhizome.MemoryStore{} // or any CheckpointStore implementation
+
+g := rhizome.New[*MyState]()
+// ... AddNode/AddEdge ...
+
+compiled, err := g.Compile(rhizome.WithCheckpointing(store))
+if err != nil {
+	// Returns ErrCheckpointRequiresSnapshotter if *MyState does not satisfy Snapshotter.
+	panic(err)
+}
+
+// Thread IDs correlate runs with checkpoints; required when checkpointing is enabled.
+final, err := compiled.Run(ctx, &MyState{}, rhizome.WithThreadID[*MyState]("conversation-123"))
+
+// If the run was interrupted, resume from the last checkpoint in a fresh state instance:
+resumed, err := compiled.Resume(ctx, "conversation-123", &MyState{})
+```
+
+`CheckpointStore` is a two-method interface; `MemoryStore` ships for tests
+and single-process use. Persistent backends (SQLite, Postgres, etc.) are
+intentionally left to separate modules so the core stays dependency-free.
+
 ## API
 
 | Function / Type | Description |
@@ -130,10 +171,16 @@ result, _ := compiled.Run(ctx, 0, rhizome.WithMiddleware(logger))
 | `AddConditionalEdge(from, router, targets...)` | Add dynamic routing; router may only return declared targets |
 | `Compile(opts...)` | Validate and freeze the graph |
 | `Run(ctx, state, opts...)` | Execute the compiled graph |
+| `Resume(ctx, threadID, empty, opts...)` | Continue a checkpointed run from its last saved node |
 | `Start` / `End` | Virtual entry and exit points |
 | `WithMaxNodeExecs(n)` | Compile option: per-node execution limit (default) |
+| `WithCheckpointing(store)` | Compile option: persist state after each node; requires `S` to satisfy `Snapshotter` |
 | `WithRunMaxNodeExecs[S](n)` | Run option: override the per-node execution limit |
 | `WithMiddleware(mw...)` | Run option: add middleware chain |
+| `WithThreadID[S](id)` | Run option: required when checkpointing is enabled |
+| `Snapshotter` | Interface state must satisfy for checkpointing (stdlib binary marshal/unmarshal) |
+| `CheckpointStore` | Interface for persisting snapshots |
+| `MemoryStore` | In-memory `CheckpointStore` for tests and single-process use (zero value is ready to use) |
 
 ## License
 

@@ -185,6 +185,11 @@ func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 		return nil, err
 	}
 
+	snapshot, err := buildSnapshotFn[S](cfg.checkpointStore)
+	if err != nil {
+		return nil, err
+	}
+
 	nodes := make(map[string]NodeFunc[S], len(g.nodes))
 	maps.Copy(nodes, g.nodes)
 	edges := make(map[string]string, len(g.edges))
@@ -202,6 +207,32 @@ func (g *Graph[S]) Compile(opts ...CompileOption) (*CompiledGraph[S], error) {
 		edges:            edges,
 		conditionalEdges: condEdges,
 		maxNodeExecs:     cfg.maxNodeExecs,
+		checkpointStore:  cfg.checkpointStore,
+		snapshot:         snapshot,
+	}, nil
+}
+
+// buildSnapshotFn returns the closure that persists state after each node.
+// When store is nil it returns a no-op so the executor can invoke it
+// unconditionally. When store is non-nil it verifies at compile time that
+// S satisfies Snapshotter and returns a closure that marshals state and
+// calls store.Save.
+func buildSnapshotFn[S any](store CheckpointStore) (func(ctx context.Context, threadID, nodeName string, state S) error, error) {
+	if store == nil {
+		return func(context.Context, string, string, S) error { return nil }, nil
+	}
+
+	var zero S
+	if _, ok := any(zero).(Snapshotter); !ok {
+		return nil, fmt.Errorf("%w: %T", ErrCheckpointRequiresSnapshotter, zero)
+	}
+
+	return func(ctx context.Context, threadID, nodeName string, state S) error {
+		data, err := any(state).(Snapshotter).MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("marshal state at %q: %w", nodeName, err)
+		}
+		return store.Save(ctx, threadID, nodeName, data)
 	}, nil
 }
 
