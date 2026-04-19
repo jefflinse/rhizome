@@ -29,3 +29,8 @@ var (
 	ErrNoCheckpoint                  = errors.New("rhizome: no checkpoint found")
 	ErrCheckpointingDisabled         = errors.New("rhizome: checkpointing is not enabled on this graph")
 )
+
+// Human-in-the-loop errors.
+var (
+	ErrNoInterruptHandler = errors.New("rhizome: no interrupt handler configured for this run")
+)

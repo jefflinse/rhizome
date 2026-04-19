@@ -32,9 +32,10 @@ func WithMaxNodeExecs(n int) CompileOption {
 type RunOption[S any] func(*runConfig[S])
 
 type runConfig[S any] struct {
-	middleware   []Middleware[S]
-	maxNodeExecs *int
-	threadID     string
+	middleware       []Middleware[S]
+	maxNodeExecs     *int
+	threadID         string
+	interruptHandler InterruptHandler
 }
 
 // WithMiddleware adds middleware to a Run invocation. Middleware executes in
@@ -171,8 +172,16 @@ func (cg *CompiledGraph[S]) execute(ctx context.Context, state S, current string
 		}
 
 		nodeName := current
+		nodeCtx := ctx
+		if cfg.interruptHandler != nil {
+			nodeCtx = context.WithValue(ctx, interruptContextKey{}, interruptBinding{
+				handler: cfg.interruptHandler,
+				node:    nodeName,
+			})
+		}
+
 		var err error
-		state, err = exec(ctx, nodeName, fn, state)
+		state, err = exec(nodeCtx, nodeName, fn, state)
 		if err != nil {
 			return state, fmt.Errorf("rhizome: node %q: %w", nodeName, err)
 		}

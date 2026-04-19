@@ -161,6 +161,50 @@ resumed, err := compiled.Resume(ctx, "conversation-123", &MyState{})
 and single-process use. Persistent backends (SQLite, Postgres, etc.) are
 intentionally left to separate modules so the core stays dependency-free.
 
+### Interrupts
+
+A node can pause execution and delegate to a consumer-provided handler by
+calling `Interrupt`. The graph's goroutine blocks inside the handler until
+it returns. Common uses include human-in-the-loop approvals (CLI prompt,
+dialog, web request awaiting a response), waiting on asynchronous external
+events (webhook callbacks, queued work results), policy gates, and
+debugging breakpoints.
+
+```go
+g.AddNode("confirm", func(ctx context.Context, s *State) (*State, error) {
+    resp, err := rhizome.Interrupt(ctx, rhizome.InterruptRequest{
+        Kind:    "approve",
+        Payload: s.Proposal,
+    })
+    if err != nil {
+        return s, err
+    }
+    s.Approved = resp.Value.(bool)
+    return s, nil
+})
+
+handler := func(ctx context.Context, req rhizome.InterruptRequest) (rhizome.InterruptResponse, error) {
+    // Blocking is expected here — the graph waits.
+    // Any blocking call should select on ctx.Done() to honor cancellation.
+    approved := promptUser(req.Payload)
+    return rhizome.InterruptResponse{Value: approved}, nil
+}
+
+final, err := compiled.Run(ctx, &State{},
+    rhizome.WithInterruptHandler[*State](handler))
+```
+
+`InterruptRequest.Node` is populated by the runtime, so node code doesn't
+need to know its own name. `Kind` and `Payload` are consumer-defined —
+use `Kind` as a discriminator if a single graph raises multiple kinds of
+interrupts. Calling `Interrupt` on a run without a handler returns
+`ErrNoInterruptHandler`.
+
+This is an in-process primitive: the graph's goroutine parks inside the
+handler and resumes when it returns. Durable pause-and-resume (where the
+responder answers minutes or days later, possibly in a different process)
+is a separate feature that layers on top of `Snapshotter`.
+
 ## API
 
 | Function / Type | Description |
@@ -178,6 +222,8 @@ intentionally left to separate modules so the core stays dependency-free.
 | `WithRunMaxNodeExecs[S](n)` | Run option: override the per-node execution limit |
 | `WithMiddleware(mw...)` | Run option: add middleware chain |
 | `WithThreadID[S](id)` | Run option: required when checkpointing is enabled |
+| `WithInterruptHandler[S](h)` | Run option: handler invoked when a node calls `Interrupt` |
+| `Interrupt(ctx, req)` | Called inside a node to pause and request input from the handler |
 | `Snapshotter` | Interface state must satisfy for checkpointing (stdlib binary marshal/unmarshal) |
 | `CheckpointStore` | Interface for persisting snapshots |
 | `MemoryStore` | In-memory `CheckpointStore` for tests and single-process use (zero value is ready to use) |
