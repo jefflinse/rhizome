@@ -120,6 +120,35 @@ logger := func(ctx context.Context, node string, state int, next rhizome.NodeFun
 result, _ := compiled.Run(ctx, 0, rhizome.WithMiddleware(logger))
 ```
 
+#### Built-in middleware
+
+Three resilience primitives are included:
+
+```go
+result, err := compiled.Run(ctx, initial, rhizome.WithMiddleware(
+    rhizome.Recover[*State](),               // trap panics, return ErrNodePanic
+    rhizome.Retry[*State](                   // retry transient failures
+        rhizome.WithMaxAttempts(3),
+    ),
+    rhizome.Timeout[*State](30*time.Second), // per-attempt deadline
+))
+```
+
+- **`Recover`** converts panics into an error wrapping `ErrNodePanic`, with
+  the panic value and stack trace included. The input state is returned
+  unchanged since the node produced no valid output.
+- **`Timeout(d)`** threads a `context.WithTimeout` into the node. Node code
+  must honor `ctx.Done()` for it to take effect.
+- **`Retry(opts...)`** re-invokes the node on error. Defaults: 3 attempts,
+  exponential backoff starting at 100ms, and a classifier that retries
+  everything *except* `context.Canceled` and `context.DeadlineExceeded`
+  (so cancelling a run unwinds promptly instead of retrying). Override
+  with `WithMaxAttempts`, `WithBackoff`, and `WithRetryIf`.
+
+When combining `Retry` with `Timeout`, place `Retry` *before* `Timeout` in
+the middleware list as shown above. That way each retry attempt gets its
+own deadline; reversing the order makes one deadline span all attempts.
+
 ### Checkpointing
 
 Opt in to persisted state and the graph saves a snapshot after every node.
@@ -227,6 +256,10 @@ is a separate feature that layers on top of `Snapshotter`.
 | `Snapshotter` | Interface state must satisfy for checkpointing (stdlib binary marshal/unmarshal) |
 | `CheckpointStore` | Interface for persisting snapshots |
 | `MemoryStore` | In-memory `CheckpointStore` for tests and single-process use (zero value is ready to use) |
+| `Recover[S]()` | Built-in middleware: trap panics as `ErrNodePanic` |
+| `Timeout[S](d)` | Built-in middleware: bound each node call with a deadline |
+| `Retry[S](opts...)` | Built-in middleware: retry failed nodes with backoff |
+| `WithMaxAttempts(n)` / `WithBackoff(fn)` / `WithRetryIf(fn)` | `Retry` options |
 
 ## License
 

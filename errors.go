@@ -34,3 +34,8 @@ var (
 var (
 	ErrNoInterruptHandler = errors.New("rhizome: no interrupt handler configured for this run")
 )
+
+// Built-in middleware errors.
+var (
+	ErrNodePanic = errors.New("rhizome: node panicked")
+)
